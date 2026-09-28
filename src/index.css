@@ -1,0 +1,27 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --color-deep: #0b3d3a;
+  --color-teal2: #14776f;
+  --color-gold: #d4af37;
+  --font-ui: "Tajawal", system-ui, sans-serif;
+  --font-quran: "Amiri", serif;
+  --animate-eq: eq 1s ease-in-out infinite;
+  --animate-ring: ring 1.6s ease-out infinite;
+  --animate-shake: shake 0.4s;
+  --animate-glow: glow 3s ease-in-out infinite;
+  @keyframes eq { 0%,100% { height: 20%; } 50% { height: 100%; } }
+  @keyframes ring { from { transform: scale(1); opacity: .6; } to { transform: scale(2); opacity: 0; } }
+  @keyframes shake { 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
+  @keyframes glow { 50% { box-shadow: 0 0 40px 6px rgba(212,175,55,.35); } }
+}
+
+body {
+  font-family: var(--font-ui);
+  background-color: #eef6f3;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='60' height='60'%3E%3Cpath d='M30 4l8 18 18 8-18 8-8 18-8-18-18-8 18-8z' fill='none' stroke='%2314776f' stroke-opacity='.12'/%3E%3C/svg%3E");
+}
+.dark body { background-color: #061f1e; color: #e8f3f0; }
+:focus-visible { outline: 3px solid var(--color-gold); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
