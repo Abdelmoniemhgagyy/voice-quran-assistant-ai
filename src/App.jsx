@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { audioUrl, findMoshaf, loadData } from "./api/mp3quran";
 import { normalize } from "./utils/arabic";
 import { parseCommand } from "./utils/parseCommand";
@@ -6,14 +6,26 @@ import useAudioPlayer from "./hooks/useAudioPlayer";
 import useLocalStorage from "./hooks/useLocalStorage";
 import useSpeechRecognition from "./hooks/useSpeechRecognition";
 import useSpeechSynthesis from "./hooks/useSpeechSynthesis";
+const Avatar = lazy(() => import("./components/Avatar"));
 
 const EXAMPLES = ["شغل سورة الكهف بصوت المنشاوي", "شغل سورة يس بصوت العفاسي", "سورة الرحمن بصوت الحصري", "التالي"];
 const fmt = (t) => (isFinite(t) ? `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}` : "0:00");
 const Card = ({ children, className = "" }) => (
-  <section className={`rounded-3xl border border-white/30 dark:border-white/10 bg-white/60 dark:bg-white/5 backdrop-blur-xl shadow-xl p-5 sm:p-6 ${className}`}>{children}</section>
+  <section className={`surface p-5 sm:p-6 ${className}`}>{children}</section>
 );
 const IconBtn = ({ label, onClick, children, className = "" }) => (
-  <button aria-label={label} title={label} onClick={onClick} className={`min-h-11 min-w-11 grid place-items-center rounded-full bg-deep/10 dark:bg-white/10 hover:bg-deep/20 transition ${className}`}>{children}</button>
+  <button type="button" aria-label={label} title={label} onClick={onClick} className={`min-h-11 min-w-11 grid place-items-center rounded-full bg-deep/10 dark:bg-white/10 hover:bg-deep/20 transition ${className}`}>{children}</button>
+);
+
+// Player icons as SVG so they look the same on every device (no emoji rendering).
+const PLAYER_PATHS = {
+  play: "M8 5v14l11-7z",
+  pause: "M6 5h4v14H6zM14 5h4v14h-4z",
+  prev: "M6 6h2v12H6zm3.5 6L18 18V6z",
+  next: "M16 6h2v12h-2zM6 18l8.5-6L6 6z",
+};
+const PlayerIcon = ({ name, size = 22 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d={PLAYER_PATHS[name]} /></svg>
 );
 
 function useDebounced(value, ms = 250) {
@@ -22,19 +34,20 @@ function useDebounced(value, ms = 250) {
   return v;
 }
 
-// Searchable list (renders first 60 matches only, for performance).
+// Keep every surah reachable without requiring a search.
 const PickList = memo(function PickList({ title, items, selected, onSelect, favs }) {
   const [q, setQ] = useState("");
   const dq = normalize(useDebounced(q));
-  const shown = useMemo(() => items.filter((i) => normalize(i.name).includes(dq)).slice(0, 60), [items, dq]);
+  const shown = useMemo(() => items.filter((i) => normalize(i.name).includes(dq)), [items, dq]);
   return (
     <div>
       <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={`ابحث: ${title}`} aria-label={`ابحث: ${title}`}
         className="w-full min-h-11 rounded-xl px-3 mb-2 bg-white/70 dark:bg-black/30 border border-teal2/30" />
       <ul className="max-h-64 overflow-y-auto rounded-xl space-y-1">
+        {!shown.length && <li className="p-3 opacity-60">لا توجد نتائج</li>}
         {shown.map((i) => (
           <li key={i.id}>
-            <button onClick={() => onSelect(i)} className={`w-full min-h-11 px-3 text-start rounded-lg transition ${selected?.id === i.id ? "bg-teal2 text-white" : "hover:bg-teal2/15"}`}>
+            <button aria-pressed={selected?.id === i.id} onClick={() => onSelect(i)} className={`w-full min-h-11 px-3 text-start rounded-lg transition ${selected?.id === i.id ? "bg-teal2 text-white" : "hover:bg-teal2/15"}`}>
               {favs?.includes(i.id) && "★ "}{i.name}
             </button>
           </li>
@@ -49,6 +62,11 @@ export default function App() {
   const [speakOn, setSpeakOn] = useLocalStorage("vqa-speak", true);
   const [history, setHistory] = useLocalStorage("vqa-history", []);
   const [favs, setFavs] = useLocalStorage("vqa-favs", []);
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const library = useRef(null);
+  const libraryTrigger = useRef(null);
+  const followUp = useRef(null);
+  const [question, setQuestion] = useState("");
   const [data, setData] = useState(null);
   const [loadError, setLoadError] = useState("");
   const [toast, setToast] = useState("");
@@ -82,6 +100,8 @@ export default function App() {
   const play = useCallback((surah, reciter, announce = true) => {
     const m = findMoshaf(reciter, surah.id);
     if (!m) return showToast(`الشيخ ${reciter.name} ليس لديه سورة ${surah.name}`);
+    setQuestion("");
+    setLibraryOpen(false);
     setCur({ surah, reciter });
     player.load(audioUrl(m, surah.id), surah.name, reciter.name);
     setHistory((h) => [{ s: surah.id, r: reciter.id }, ...h.filter((x) => !(x.s === surah.id && x.r === reciter.id))].slice(0, 10));
@@ -91,8 +111,8 @@ export default function App() {
 
   // Ask a question by voice, then listen for the answer.
   const ask = useCallback((question) => {
-    speak(question, () => setTimeout(() => rec.start(handleText), 300));
-    if (!speakOn) showToast(question);
+    setQuestion(question);
+    speak(question, () => { followUp.current = setTimeout(() => rec.start(handleText), 300); });
   }, [speak, speakOn]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function handleText(text) {
@@ -112,11 +132,26 @@ export default function App() {
     play(surah, reciter);
   }
 
+  useEffect(() => () => clearTimeout(followUp.current), []);
+
+  useEffect(() => {
+    if (libraryOpen) library.current?.showModal();
+    else library.current?.close();
+  }, [libraryOpen]);
+
+  function toggleMicrophone() {
+    if (rec.state === "listening") return rec.stop();
+    clearTimeout(followUp.current);
+    window.speechSynthesis?.cancel();
+    player.pause();
+    setQuestion("");
+    rec.start(handleText);
+  }
+
   // Keyboard shortcuts: Space = play/pause, arrows = seek.
   useEffect(() => {
     const onKey = (e) => {
-      if (/INPUT|BUTTON|SELECT/.test(e.target.tagName) && e.code === "Space") return;
-      if (e.target.tagName === "INPUT") return;
+      if (libraryOpen || e.target.isContentEditable || /INPUT|BUTTON|SELECT|TEXTAREA/.test(e.target.tagName)) return;
       if (e.code === "Space") { e.preventDefault(); player.toggle(); }
       if (e.code === "ArrowLeft") player.seek(player.time + 10);
       if (e.code === "ArrowRight") player.seek(player.time - 10);
@@ -130,62 +165,81 @@ export default function App() {
   const toggleFav = (id) => setFavs((f) => (f.includes(id) ? f.filter((x) => x !== id) : [...f, id]));
 
   return (
-    <div className="min-h-screen pb-28 text-deep dark:text-emerald-50">
-      <header className="max-w-6xl mx-auto flex items-center justify-between p-4">
-        <h1 className="font-quran text-3xl font-bold text-teal2 dark:text-gold">۞ مساعد القرآن الصوتي</h1>
-        <div className="flex gap-2">
-          <IconBtn label={speakOn ? "إيقاف الرد الصوتي" : "تشغيل الرد الصوتي"} onClick={() => setSpeakOn(!speakOn)}>{speakOn ? "🔊" : "🔇"}</IconBtn>
-          <IconBtn label="تبديل الوضع الداكن" onClick={() => setDark(!dark)}>{dark ? "☀️" : "🌙"}</IconBtn>
+    <div className="app-shell" dir="rtl">
+      <header className="app-header">
+        <a className="brand" href="#"><span className="brand-mark">۞</span><span><strong>قانتون</strong><small>مساعدك للاستماع إلى القرآن</small></span></a>
+        <div className="header-actions">
+          <button ref={libraryTrigger} className="library-button" onClick={() => setLibraryOpen(true)} aria-haspopup="dialog"><span aria-hidden="true">☷</span> <span>مكتبة القرآن</span></button>
+          <IconBtn label={speakOn ? "إيقاف الرد الصوتي" : "تشغيل الرد الصوتي"} onClick={() => setSpeakOn(!speakOn)}><SoundIcon muted={!speakOn} /></IconBtn>
+          <IconBtn label="تبديل الوضع الداكن" onClick={() => setDark(!dark)}>{dark ? "☼" : "☾"}</IconBtn>
         </div>
       </header>
 
-      <div aria-live="polite" className="sr-only">{status}</div>
-      {toast && <div role="status" className="fixed top-4 inset-x-4 mx-auto max-w-md z-50 rounded-2xl bg-deep text-white px-4 py-3 shadow-2xl text-center">{toast}</div>}
-
-      <main className="max-w-6xl mx-auto px-4 grid gap-5 lg:grid-cols-2">
-        <div className="space-y-5">
-          <Card className="text-center">
-            {!rec.supported && <p className="mb-4 rounded-xl bg-gold/20 p-3">متصفحك لا يدعم التعرف على الصوت، استخدم الاختيار اليدوي (يفضّل Chrome).</p>}
-            <div className="relative mx-auto my-4 w-28 h-28">
-              {rec.state === "listening" && <span className="absolute inset-0 rounded-full bg-teal2/40 animate-ring" />}
-              <button aria-label="ابدأ التحدث" disabled={!rec.supported || !data} onClick={() => rec.start(handleText)}
-                className={`relative w-28 h-28 rounded-full text-4xl text-white bg-gradient-to-br from-teal2 to-deep shadow-xl disabled:opacity-40 ${rec.state === "idle" ? "animate-glow" : ""} ${rec.state === "error" ? "animate-shake" : ""}`}>
-                {rec.state === "processing" ? <span className="inline-block w-8 h-8 border-4 border-white/40 border-t-white rounded-full animate-spin" /> : "🎙️"}
-              </button>
-            </div>
-            <p className="min-h-6">{status}</p>
-            {rec.transcript && <p className="mt-2 rounded-xl bg-white/50 dark:bg-black/20 p-2">سمعتك: {rec.transcript}</p>}
-            <div className="mt-4 flex flex-wrap justify-center gap-2">
-              {EXAMPLES.map((t) => <button key={t} disabled={!data} onClick={() => handleText(t)} className="min-h-11 px-3 rounded-full border border-gold/60 text-sm hover:bg-gold/20 disabled:opacity-40">{t}</button>)}
-            </div>
-          </Card>
-
-          <Card>
-            {cur ? (<>
-              <p className="font-quran text-5xl text-center text-teal2 dark:text-gold">{cur.surah.name}</p>
-              <p className="text-center mt-2">{cur.reciter.name} <button aria-label="أضف الشيخ للمفضلة" onClick={() => toggleFav(cur.reciter.id)}>{favs.includes(cur.reciter.id) ? "★" : "☆"}</button></p>
-              <p className="text-center text-sm opacity-70">{findMoshaf(cur.reciter, cur.surah.id)?.name}</p>
-              <div className="flex items-end justify-center gap-1 h-8 my-3" aria-hidden>
-                {[0, 0.2, 0.4, 0.1, 0.3].map((d, i) => <span key={i} className="w-1.5 h-full rounded bg-gold animate-eq" style={{ animationDelay: `${d}s`, animationPlayState: player.playing ? "running" : "paused" }} />)}
-              </div>
-              <input type="range" aria-label="شريط التقدم" min="0" max={player.duration || 0} value={player.time} onChange={(e) => player.seek(+e.target.value)} className="w-full accent-teal2" />
-              <div className="flex justify-between text-xs" dir="ltr"><span>{fmt(player.time)}</span><span>{fmt(player.duration)}</span></div>
-              <div className="flex items-center justify-center gap-3 my-3">
-                <IconBtn label="السورة السابقة" onClick={() => step(-1)}>⏮</IconBtn>
-                <IconBtn label={player.playing ? "إيقاف مؤقت" : "تشغيل"} onClick={player.toggle} className="!min-h-14 !min-w-14 !bg-teal2 text-white text-2xl">{player.playing ? "⏸" : "▶"}</IconBtn>
-                <IconBtn label="السورة التالية" onClick={() => step(1)}>⏭</IconBtn>
-              </div>
-              <div className="flex items-center gap-3 justify-center">
-                <input type="range" aria-label="مستوى الصوت" min="0" max="1" step="0.05" value={player.volume} onChange={(e) => player.setVolume(+e.target.value)} className="w-32 accent-gold" />
-                <select aria-label="سرعة التشغيل" value={player.rate} onChange={(e) => player.setRate(+e.target.value)} className="min-h-11 rounded-lg px-2 bg-white/70 dark:bg-black/40">
-                  {[0.75, 1, 1.25, 1.5].map((r) => <option key={r} value={r}>{r}x</option>)}
-                </select>
-              </div>
-            </>) : <p className="text-center opacity-70">لم يتم تشغيل أي سورة بعد</p>}
-          </Card>
+      {toast && !libraryOpen && <div role="status" className="toast-message">{toast}</div>}
+      <main className="main-stage">
+        <div className="intro">
+          <span className="eyebrow"><span /> مساحة للطمأنينة</span>
+          <h1>قُرآن يُتلى، <em>وقلب يطمئن.</em></h1>
+          <p>أنا مساعدك الصوتي. قل لي ما تحب أن تسمع.</p>
         </div>
-
-        <div className="space-y-5">
+        <div className={`avatar-stage ${rec.state === "listening" ? "is-listening" : ""}`}>
+          <div className="arch arch-outer" aria-hidden="true" /><div className="arch arch-inner" aria-hidden="true" />
+          <span className="stage-star star-one" aria-hidden="true">✧</span><span className="stage-star star-two" aria-hidden="true">✧</span>
+          <Suspense fallback={<div className="avatar-loading" role="status">نجهّز مساعدك…</div>}><Avatar listening={rec.state === "listening"} playing={player.playing} processing={rec.state === "processing"} /></Suspense>
+          <div className="avatar-caption"><span className={`activity-dot ${rec.state === "listening" ? "active" : ""}`} />{rec.state === "listening" ? "معك… أسمعك" : player.playing ? "وقت التلاوة" : "أهلًا بك، أنا قانتون"}</div>
+        </div>
+        <div className="conversation" aria-live="polite" aria-atomic="true">
+          <p className={rec.state === "error" ? "error-message" : ""}>{!rec.supported ? "التعرف على الصوت غير متاح في متصفحك. اختر من مكتبة القرآن." : loadError ? "تعذر تحميل المكتبة" : !data ? "لحظات، نجهّز لك مكتبة القرآن…" : rec.state === "error" ? status : question || status}</p>
+          {loadError && <button className="retry-button" onClick={fetchData}>إعادة المحاولة</button>}
+          {rec.transcript && <p className="transcript">«{rec.transcript}»</p>}
+        </div>
+        <Card className="player-card">
+          {cur ? (<>
+            <p className="font-quran text-5xl text-center text-teal2 dark:text-gold">{cur.surah.name}</p>
+            <p className="text-center mt-2">{cur.reciter.name} <button className="min-h-11 min-w-11" aria-label={favs.includes(cur.reciter.id) ? "إزالة الشيخ من المفضلة" : "أضف الشيخ للمفضلة"} aria-pressed={favs.includes(cur.reciter.id)} onClick={() => toggleFav(cur.reciter.id)}>{favs.includes(cur.reciter.id) ? "★" : "☆"}</button></p>
+            <p className="text-center text-sm opacity-70">{findMoshaf(cur.reciter, cur.surah.id)?.name}</p>
+            <div className="flex items-end justify-center gap-1 h-8 my-3" aria-hidden>
+              {[0, 0.2, 0.4, 0.1, 0.3].map((d, i) => <span key={i} className="w-1.5 h-full rounded bg-gold animate-eq" style={{ animationDelay: `${d}s`, animationPlayState: player.playing ? "running" : "paused" }} />)}
+            </div>
+            <input type="range" aria-label="شريط التقدم" min="0" max={player.duration || 0} value={player.time} onChange={(e) => player.seek(+e.target.value)} className="w-full accent-teal2" />
+            <div className="flex justify-between text-xs" dir="ltr"><span>{fmt(player.time)}</span><span>{fmt(player.duration)}</span></div>
+            <div className="flex items-center justify-center gap-4 my-4" dir="ltr">
+              <IconBtn
+                label="السورة السابقة"
+                onClick={() => step(-1)}
+                className="!h-12 !w-12 text-teal2 dark:text-gold active:scale-95 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-teal2/40"
+              >
+                <PlayerIcon name="prev" />
+              </IconBtn>
+              <IconBtn
+                label={player.playing ? "إيقاف مؤقت" : "تشغيل"}
+                onClick={player.toggle}
+                className="!h-16 !w-16 !bg-teal2 hover:!bg-teal2/90 text-white shadow-lg active:scale-95 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-teal2/40"
+              >
+                <PlayerIcon name={player.playing ? "pause" : "play"} size={30} />
+              </IconBtn>
+              <IconBtn
+                label="السورة التالية"
+                onClick={() => step(1)}
+                className="!h-12 !w-12 text-teal2 dark:text-gold active:scale-95 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-teal2/40"
+              >
+                <PlayerIcon name="next" />
+              </IconBtn>
+            </div>
+            <div className="flex items-center gap-3 justify-center">
+              <input type="range" aria-label="مستوى الصوت" min="0" max="1" step="0.05" value={player.volume} onChange={(e) => player.setVolume(+e.target.value)} className="w-32 accent-gold" />
+              <select aria-label="سرعة التشغيل" value={player.rate} onChange={(e) => player.setRate(+e.target.value)} className="min-h-10 rounded-lg p-2 bg-white/70 dark:bg-black/40">
+                {[0.75, 1, 1.25, 1.5].map((r) => <option key={r} value={r}>{r}x</option>)}
+              </select>
+            </div>
+          </>) : <div className="empty-player"><span className="empty-player-icon">♫</span><div><strong>رحلتك مع القرآن تبدأ بكلمة</strong><p>اطلب سورة بصوت قارئك المفضل، أو اختر من المكتبة</p></div></div>}
+        </Card>
+        <p className="stage-footer">تلاوات تُرافق يومك <span>✦</span> من مكتبة MP3Quran</p>
+      </main>
+      <dialog ref={library} className="library-dialog" onCancel={() => setLibraryOpen(false)} onClose={() => { setLibraryOpen(false); libraryTrigger.current?.focus(); }} onClick={(event) => { if (event.target === event.currentTarget) setLibraryOpen(false); }} aria-labelledby="library-title">
+        <div className="library-content space-y-5">
+          <div className="library-heading"><div><span className="eyebrow">على ذوقك</span><h2 id="library-title">مكتبة القرآن</h2></div><IconBtn label="إغلاق المكتبة" onClick={() => setLibraryOpen(false)}>✕</IconBtn></div>
+          {toast && <p role="status" className="rounded-xl bg-teal2/10 p-3">{toast}</p>}
           <Card>
             <h2 className="font-bold mb-3">اختيار يدوي</h2>
             {loadError ? (
@@ -217,14 +271,20 @@ export default function App() {
             </Card>
           )}
         </div>
-      </main>
-
-      {cur && (
-        <div className="fixed bottom-0 inset-x-0 lg:hidden p-3 bg-deep text-white flex items-center gap-3 shadow-2xl">
-          <div className="flex-1 min-w-0"><p className="font-quran text-xl truncate">{cur.surah.name}</p><p className="text-xs truncate opacity-80">{cur.reciter.name}</p></div>
-          <IconBtn label={player.playing ? "إيقاف مؤقت" : "تشغيل"} onClick={player.toggle} className="!bg-gold !text-deep">{player.playing ? "⏸" : "▶"}</IconBtn>
-        </div>
-      )}
+      </dialog>
+      <div className="mic-dock">
+        <button className={`mic-button ${rec.state === "listening" ? "listening" : ""}`} aria-label={rec.state === "listening" ? "إنهاء الاستماع" : "ابدأ التحدث"} aria-pressed={rec.state === "listening"} disabled={!rec.supported || !data || rec.state === "processing"} onClick={toggleMicrophone}>
+          {rec.state === "processing" ? <span className="mic-spinner" /> : rec.state === "listening" ? <span className="listening-bars" aria-hidden="true">{[0, 1, 2, 3, 4].map(i => <i key={i} style={{ animationDelay: `${i * 0.12}s` }} />)}</span> : <MicIcon />}
+        </button>
+        <div className="mic-hint">{rec.state === "listening" ? "اضغط لإنهاء الطلب" : "اضغط وتكلم"}<small>{rec.state === "listening" ? "بسمعك الآن…" : "السورة والقارئ بصوتك"}</small></div>
+      </div>
     </div>
   );
+}
+
+function MicIcon() {
+  return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3" /><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8" /></svg>;
+}
+function SoundIcon({ muted }) {
+  return <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M11 4 5 9H2v6h3l6 5z" />{muted ? <path d="m16 9 6 6m0-6-6 6" /> : <><path d="M15 8a6 6 0 0 1 0 8M18 4a11 11 0 0 1 0 16" /></>}</svg>;
 }
